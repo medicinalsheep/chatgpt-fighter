@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>chatgpt-fighter</title>
+    <link rel="stylesheet" href="/src/index.css" />
+</head>
+<body>
+    <div id="app">
+        <header class="topbar">
+            <div class="brand">
+                <div class="logo">CGF</div>
+                <div>
+                    <div class="title">chatgpt-fighter</div>
+                    <div class="sub">Prompt-driven characters • Deterministic lockstep • P2P</div>
+                </div>
+            </div>
+
+            <div class="topbar-right">
+                <div class="pill" id="pillUser">User: <span id="userLabel">—</span></div>
+                <button class="btn ghost" id="btnSettings">Settings</button>
+                <button class="btn ghost" id="btnHome">Home</button>
+            </div>
+        </header>
+
+        <main class="main">
+            <!-- SCREEN: Username -->
+            <section class="screen active" id="screen-username">
+                <div class="panel">
+                    <h1>Enter your username</h1>
+                    <p class="muted">
+                        This is stored locally on your machine. You’ll use it in lobbies and matches.
+                    </p>
+
+                    <div class="row">
+                        <input id="usernameInput" class="input" placeholder="e.g., NeoFighter42" maxlength="20" />
+                        <button id="btnUsernameContinue" class="btn primary">Continue</button>
+                    </div>
+
+                    <div class="spacer"></div>
+                    <div class="muted tiny">
+                        Tip: This app uses WebRTC P2P with manual Offer/Answer codes—no server required.
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Home -->
+            <section class="screen" id="screen-home">
+                <div class="grid2">
+                    <div class="panel">
+                        <h2>Create a character (prompt-driven)</h2>
+                        <p class="muted">
+                            Use the prompt generator to produce a strict JSON Character Code. Paste it back to save.
+                            All stats are budgeted to keep matches fair.
+                        </p>
+                        <div class="row">
+                            <button class="btn primary" id="btnGoPrompt">Open Prompt Generator</button>
+                            <button class="btn" id="btnGoImport">Import / Manage Characters</button>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <h2>Play Multiplayer (P2P)</h2>
+                        <p class="muted">
+                            Host creates an Offer code and shares it. Joiner pastes Offer and sends back Answer.
+                            Then you fight in deterministic lockstep.
+                        </p>
+                        <div class="row">
+                            <button class="btn primary" id="btnGoLobby">Go to Lobby</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>How it works</h2>
+                    <ol class="muted">
+                        <li>Generate prompt → get Character Code JSON from ChatGPT.</li>
+                        <li>Paste code → app validates fairness and saves locally.</li>
+                        <li>Host/Join → exchange Offer/Answer codes → DataChannel opens.</li>
+                        <li>Game runs deterministic lockstep by exchanging only per-frame inputs.</li>
+                    </ol>
+                </div>
+            </section>
+
+            <!-- SCREEN: Prompt Generator -->
+            <section class="screen" id="screen-prompt">
+                <div class="panel">
+                    <h1>Prompt Generator</h1>
+                    <p class="muted">
+                        Pick an archetype + flavor. The generated prompt forces ChatGPT to output a strict JSON
+                        character within a fairness budget.
+                    </p>
+
+                    <div class="grid2">
+                        <div>
+                            <label class="label">Archetype</label>
+                            <select id="archSelect" class="input">
+                                <option value="balanced">Balanced</option>
+                                <option value="rushdown">Rushdown (fast, close)</option>
+                                <option value="zoner">Zoner (projectiles, range)</option>
+                                <option value="grappler">Grappler (high damage, slow)</option>
+                                <option value="trickster">Trickster (weird specials)</option>
+                            </select>
+
+                            <label class="label">Theme / Aesthetic</label>
+                            <input id="themeInput" class="input" placeholder="e.g., cyber ninja, stone golem, jazz robot..." maxlength="60" />
+
+                            <label class="label">Personality one-liner</label>
+                            <input id="lineInput" class="input" placeholder="e.g., 'I debug you with my fists.'" maxlength="80" />
+
+                            <div class="row">
+                                <button class="btn primary" id="btnGeneratePrompt">Generate Prompt</button>
+                                <button class="btn" id="btnCopyPrompt">Copy</button>
+                            </div>
+
+                            <div class="callout tiny muted">
+                                After ChatGPT returns JSON, paste it in <b>Import / Manage Characters</b>.
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="label">Generated Prompt</label>
+                            <textarea id="promptOut" class="textarea" spellcheck="false"></textarea>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Character Import/Manage -->
+            <section class="screen" id="screen-import">
+                <div class="panel">
+                    <div class="row space-between">
+                        <div>
+                            <h1>Import / Manage Characters</h1>
+                            <p class="muted">Paste Character Code JSON. We validate fairness and store locally.</p>
+                        </div>
+                        <div class="row">
+                            <button class="btn ghost" id="btnDeleteChar">Delete Selected</button>
+                            <button class="btn" id="btnExportChar">Export Selected</button>
+                        </div>
+                    </div>
+
+                    <div class="grid2">
+                        <div>
+                            <label class="label">Saved characters</label>
+                            <select id="charSelect" class="input"></select>
+
+                            <div class="spacer"></div>
+                            <div class="statbox" id="charSummary"></div>
+
+                            <div class="spacer"></div>
+                            <button class="btn primary" id="btnUseThisChar">Set as Active Character</button>
+                        </div>
+
+                        <div>
+                            <label class="label">Paste Character Code JSON here</label>
+                            <textarea id="charCodeIn" class="textarea" spellcheck="false" placeholder="{ ... }"></textarea>
+                            <div class="row">
+                                <button class="btn primary" id="btnValidateSave">Validate & Save</button>
+                                <button class="btn" id="btnClearCode">Clear</button>
+                            </div>
+                            <div class="error" id="importError" style="display:none;"></div>
+                            <div class="ok" id="importOk" style="display:none;"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Lobby -->
+            <section class="screen" id="screen-lobby">
+                <div class="panel">
+                    <div class="row space-between">
+                        <div>
+                            <h1>Lobby</h1>
+                            <p class="muted">Choose Host or Join. Exchange Offer/Answer codes to connect.</p>
+                        </div>
+                        <div class="pill">Active: <span id="activeCharLabel">—</span></div>
+                    </div>
+
+                    <div class="grid2">
+                        <div class="panel inset">
+                            <h2>Host</h2>
+                            <p class="muted tiny">Create an Offer code. Send it to your friend.</p>
+                            <button class="btn primary" id="btnHostCreateOffer">Create Offer</button>
+
+                            <label class="label">Offer code (send this)</label>
+                            <textarea id="offerOut" class="textarea" spellcheck="false"></textarea>
+
+                            <label class="label">Paste Answer code (from joiner)</label>
+                            <textarea id="answerIn" class="textarea" spellcheck="false"></textarea>
+
+                            <div class="row">
+                                <button class="btn primary" id="btnHostAcceptAnswer">Accept Answer & Connect</button>
+                                <button class="btn" id="btnHostReset">Reset</button>
+                            </div>
+                        </div>
+
+                        <div class="panel inset">
+                            <h2>Join</h2>
+                            <p class="muted tiny">Paste Offer from host. Generate Answer. Send Answer back.</p>
+
+                            <label class="label">Paste Offer code</label>
+                            <textarea id="offerIn" class="textarea" spellcheck="false"></textarea>
+
+                            <div class="row">
+                                <button class="btn primary" id="btnJoinCreateAnswer">Create Answer</button>
+                                <button class="btn" id="btnJoinReset">Reset</button>
+                            </div>
+
+                            <label class="label">Answer code (send this)</label>
+                            <textarea id="answerOut" class="textarea" spellcheck="false"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="row space-between">
+                        <div class="muted tiny" id="netStatus">Status: idle</div>
+                        <div class="row">
+                            <button class="btn ghost" id="btnDisconnect">Disconnect</button>
+                            <button class="btn primary" id="btnStartMatch" disabled>Start Match</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Game -->
+            <section class="screen" id="screen-game">
+                <div class="gameShell">
+                    <div class="hud">
+                        <div class="barWrap">
+                            <div class="nameRow">
+                                <span id="p1Name">P1</span>
+                                <span class="tiny muted" id="p1Char">—</span>
+                            </div>
+                            <div class="bar">
+                                <div class="barFill" id="p1HP"></div>
+                            </div>
+                            <div class="meter">
+                                <div class="meterFill" id="p1Meter"></div>
+                            </div>
+                        </div>
+
+                        <div class="centerHud">
+                            <div class="roundText" id="roundText">READY</div>
+                            <div class="muted tiny" id="syncText"></div>
+                        </div>
+
+                        <div class="barWrap">
+                            <div class="nameRow right">
+                                <span class="tiny muted" id="p2Char">—</span>
+                                <span id="p2Name">P2</span>
+                            </div>
+                            <div class="bar">
+                                <div class="barFill enemy" id="p2HP"></div>
+                            </div>
+                            <div class="meter">
+                                <div class="meterFill enemy" id="p2Meter"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <canvas id="gameCanvas" width="1120" height="520"></canvas>
+
+                    <div class="gameBottom">
+                        <div class="controlsHint muted tiny">
+                            Controls: A/D move • W jump • J punch • K kick • L special • S block
+                        </div>
+                        <div class="row">
+                            <button class="btn" id="btnLeaveMatch">Leave Match</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Result -->
+            <section class="screen" id="screen-result">
+                <div class="panel">
+                    <h1 id="resultTitle">Result</h1>
+                    <p class="muted" id="resultSub"></p>
+                    <div class="row">
+                        <button class="btn primary" id="btnRematch">Rematch</button>
+                        <button class="btn" id="btnBackToLobby">Back to Lobby</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- SCREEN: Settings modal -->
+            <div class="modal" id="settingsModal" aria-hidden="true">
+                <div class="modalCard">
+                    <div class="row space-between">
+                        <h2>Settings</h2>
+                        <button class="btn ghost" id="btnCloseSettings">Close</button>
+                    </div>
+
+                    <div class="grid2">
+                        <div>
+                            <label class="label">Master Volume</label>
+                            <input type="range" min="0" max="100" value="60" id="volRange" />
+                            <div class="muted tiny" id="volLabel"></div>
+
+                            <div class="spacer"></div>
+                            <label class="row">
+                                <input type="checkbox" id="musicToggle" checked />
+                                <span>Music</span>
+                            </label>
+
+                            <label class="row">
+                                <input type="checkbox" id="sfxToggle" checked />
+                                <span>SFX</span>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label class="label">Netcode</label>
+                            <div class="muted tiny">
+                                Lockstep input delay (frames). Higher = smoother under lag, more latency.
+                            </div>
+                            <input type="range" min="0" max="6" value="2" id="delayRange" />
+                            <div class="muted tiny" id="delayLabel"></div>
+
+                            <div class="spacer"></div>
+                            <button class="btn ghost" id="btnResetStorage">Reset Local Storage</button>
+                            <div class="muted tiny">Clears username, characters, and settings.</div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script type="module" src="/src/renderer.js"></script>
+</body>
+</html>
