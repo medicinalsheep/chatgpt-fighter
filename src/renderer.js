@@ -710,6 +710,11 @@ Now output the JSON.`.trim();
             localInputs.clear();
             remoteInputs.clear();
 
+            for (let f = 0; f < inputDelay; f++) {
+                localInputs.set(f, 0);
+                Net.send({ t: "in", f, m: 0 });
+            }
+
             stalled = false;
             stallFrames = 0;
 
@@ -742,6 +747,29 @@ Now output the JSON.`.trim();
         }
 
         function makeFighter(i, x, y, char, d) {
+            const viz = deriveVisuals(char);
+
+            // Base sizes
+            const baseW = 42 * FP;
+            const baseH = 106 * FP;
+
+            let w = baseW;
+            let h = baseH;
+
+            if (viz.silhouette === "bulky") {
+                w += 10 * FP; h += 12 * FP;
+            } else if (viz.silhouette === "nimble") {
+                w -= 6 * FP; h -= 4 * FP;
+            }
+
+            // Slight stat influence (subtle, still readable)
+            w += (char.stats.health - 5) * 2 * FP + (char.stats.defense - 5) * 1 * FP;
+            w -= (char.stats.speed - 5) * 1 * FP;
+            h += (char.stats.health - 5) * 2 * FP;
+            h -= (char.stats.jump - 5) * 1 * FP;
+
+            w = clamp(w, 34 * FP, 62 * FP);
+            h = clamp(h, 90 * FP, 140 * FP);
             return {
                 idx: i,
                 char,
@@ -751,8 +779,12 @@ Now output the JSON.`.trim();
                 vx: 0,
                 vy: 0,
 
-                w: 46 * FP,
-                h: 110 * FP,
+                w,
+                h,
+                viz,
+
+                coyote: 0,
+                jumpBuf: 0,
 
                 onGround: true,
                 facing: i === 0 ? 1 : -1,
@@ -772,23 +804,75 @@ Now output the JSON.`.trim();
         }
 
         function getHurtbox(f) {
-            // simple rectangle
-            const left = f.x - f.w / 2;
-            const top = f.y - f.h;
-            return { x: left, y: top, w: f.w, h: f.h };
+            // Smaller than the drawn body so hits feel fair.
+            // Also changes slightly by state (jump/hurt/ko).
+            const w = f.w;
+            const h = f.h;
+
+            // Base padding (in fixed-point)
+            let padX = Math.floor(w * 18 / 100);     // 18% narrower
+            let padTop = 14 * FP;                   // head padding
+            let padBottom = 10 * FP;                // feet padding
+
+            if (f.state === "jump") {
+                padX = Math.floor(w * 22 / 100);
+                padBottom = 14 * FP;
+            }
+            if (f.state === "hurt") {
+                padX = Math.floor(w * 24 / 100);
+            }
+            if (f.state === "ko") {
+                padX = Math.floor(w * 28 / 100);
+                padTop = 18 * FP;
+            }
+
+            const left = (f.x - w / 2) + padX;
+            const top = (f.y - h) + padTop;
+            const rw = w - padX * 2;
+            const rh = h - padTop - padBottom;
+
+            return { x: left, y: top, w: rw, h: rh };
         }
 
         function getHitbox(f) {
-            // based on state & frame
-            const range = f.d.range * FP;
-            const baseY = f.y - (70 * FP);
+            // Returns a hitbox that starts at the fighter front edge.
+            // The collision code later converts this into a world rect based on facing.
             const dir = f.facing;
+
+            // Range and height tuned to feel better with the new hurtbox.
+            const range = (f.d.range * FP);
+            const frontX = f.x + dir * (f.w / 2 + 4 * FP);
+
+            // Different vertical targets for different moves / states
+            const midY = f.y - 72 * FP;
+            const highY = f.y - 92 * FP;
+            const lowY = f.y - 52 * FP;
+
+            // Punch: quick, mid/high
             if (f.state === "punch" && f.stateFrame >= 4 && f.stateFrame <= 6) {
-                return { x: f.x + dir * (f.w / 2), y: baseY, w: range, h: 22 * FP, dmg: 26, type: "punch" };
+                const y = (f.onGround ? midY : highY);
+                return {
+                    x: frontX,
+                    y,
+                    w: Math.floor(range * 0.90),
+                    h: 20 * FP,
+                    dmg: 24,
+                    type: "punch"
+                };
             }
-            if (f.state === "kick" && f.stateFrame >= 5 && f.stateFrame <= 8) {
-                return { x: f.x + dir * (f.w / 2), y: baseY + 10 * FP, w: range + 10 * FP, h: 26 * FP, dmg: 32, type: "kick" };
+
+            // Kick: slower, wider + slightly lower
+            if (f.state === "kick" && f.stateFrame >= 6 && f.stateFrame <= 9) {
+                return {
+                    x: frontX,
+                    y: lowY,
+                    w: range + 10 * FP,
+                    h: 26 * FP,
+                    dmg: 32,
+                    type: "kick"
+                };
             }
+
             return null;
         }
 
@@ -807,24 +891,19 @@ Now output the JSON.`.trim();
         }
 
         function applyDamage(attacker, defender, baseDmg, kind) {
-            // Deterministic integer damage calc
-            // Scale with attacker ATK and defender DEF.
-            const atk = attacker.d.atk; // 14..26
-            const def = defender.d.def; // 14..26
+            const atk = attacker.d.atk;
+            const def = defender.d.def;
 
-            // Base damage in "game units"
-            // Damage multiplier: (100 + 3*(atk-14)) / (100 + 2*(def-14))
             const atkMul = 100 + 3 * (atk - 14);
             const defMul = 100 + 2 * (def - 14);
 
             let dmg = Math.floor((baseDmg * atkMul) / defMul);
 
-            // Block reduces damage and prevents stun (mostly)
             const isBlocking = defender.state === "block";
             if (isBlocking) {
-                dmg = Math.floor(dmg * 0.35);
+                const mult = (kind === "projectile") ? 0.25 : 0.35;
+                dmg = Math.floor(dmg * mult);
             }
-
             dmg = clamp(dmg, 1, 120);
 
             defender.hp = Math.max(0, defender.hp - dmg);
@@ -832,18 +911,43 @@ Now output the JSON.`.trim();
             // meter gain
             const gain = attacker.d.meterGain;
             attacker.meter = clamp(attacker.meter + gain, 0, 100);
-
-            // defender small meter on block/hit
             defender.meter = clamp(defender.meter + Math.floor(gain / 3), 0, 100);
 
-            // stun
+            // stun + state
             if (!isBlocking) {
-                defender.stun = Math.max(defender.stun, kind === "kick" ? 14 : 10);
+                const stunFrames =
+                    (kind === "kick") ? 14 :
+                        (kind === "projectile") ? 12 :
+                            10;
+
+                defender.stun = Math.max(defender.stun, stunFrames);
                 defender.state = "hurt";
                 defender.stateFrame = 0;
             } else {
                 defender.state = "block";
                 defender.stateFrame = 0;
+            }
+
+            // Knockback (improves readability and reduces overlap)
+            const dir = attacker.facing; // -1 or 1
+
+            // Knockback speed in px/sec-ish terms mapped to per-frame FP velocity
+            let kb =
+                (kind === "kick") ? 540 :
+                    (kind === "punch") ? 440 :
+                        480;
+
+            kb += (attacker.d.atk - 14) * 16; // scale with attack
+
+            if (isBlocking) kb = Math.floor(kb * 0.35);
+
+            const kbV = Math.floor((kb * FP) / 60); // convert to FP per frame
+            defender.vx = dir * kbV;
+
+            // Small pop-up only when not blocking and on ground
+            if (!isBlocking && defender.onGround) {
+                defender.vy = Math.min(defender.vy, -(520)); // ~5.2 px/frame upward
+                defender.onGround = false;
             }
 
             // hitstop / shake / particles
@@ -883,17 +987,20 @@ Now output the JSON.`.trim();
             const w = size * FP;
             const h = size * FP;
 
-            const px = owner.x + dir * (owner.w / 2 + 10 * FP);
+            const px = owner.x + dir * (owner.w / 2 + 18 * FP);
             const py = owner.y - 80 * FP;
 
             projectiles.push({
                 ownerIdx: owner.idx,
                 x: px,
                 y: py,
-                vx: dir * (spd * 36) * FP / 10, // tuned speed in fixedpoint
-                w, h,
+                vx: dir * (spd * 36) * FP / 10,
+                w,
+                h,
                 dmg,
-                life: 90 // frames
+                life: 70 + owner.char.stats.range * 6, // range affects travel time
+                shape: owner.viz?.projShape || "orb",
+                color: owner.char.palette.secondary
             });
 
             Audio.sfx.special();
@@ -901,41 +1008,10 @@ Now output the JSON.`.trim();
         }
 
         function getProjectileRect(p) {
-            return { x: p.x - p.w / 2, y: p.y - p.h / 2, w: p.w, h: p.h };
-        }
-
-        function integrateFighter(f) {
-            // Gravity
-            const gravity = 1200 * FP / FPS; // per frame acceleration scaled
-            if (!f.onGround) {
-                f.vy += gravity;
-            }
-
-            // Apply velocities
-            f.x += f.vx;
-            f.y += f.vy;
-
-            // Floor
-            if (f.y >= FIX_GROUND) {
-                f.y = FIX_GROUND;
-                f.vy = 0;
-                f.onGround = true;
-            } else {
-                f.onGround = false;
-            }
-
-            // Walls
-            const leftWall = 60 * FP;
-            const rightWall = FIX_W - 60 * FP;
-            f.x = clamp(f.x, leftWall, rightWall);
-
-            // friction
-            if (f.onGround) {
-                f.vx = Math.floor(f.vx * 85 / 100);
-                if (Math.abs(f.vx) < 12 * FP) f.vx = 0;
-            } else {
-                f.vx = Math.floor(f.vx * 96 / 100);
-            }
+            // Slightly smaller than drawn so it feels fair
+            const w = Math.floor(p.w * 85 / 100);
+            const h = Math.floor(p.h * 85 / 100);
+            return { x: p.x - w / 2, y: p.y - h / 2, w, h };
         }
 
         function updateFacing() {
@@ -950,8 +1026,7 @@ Now output the JSON.`.trim();
 
             if (hitstop > 0) {
                 hitstop--;
-                // still update HUD while paused
-                return;
+                return; // hitstop freezes simulation
             }
 
             // Update fighters
@@ -960,6 +1035,7 @@ Now output the JSON.`.trim();
                 const opp = fighters[1 - i];
                 const m = inputMasks[i] | 0;
 
+                // KO transition
                 if (f.hp <= 0 && f.state !== "ko") {
                     f.state = "ko";
                     f.stateFrame = 0;
@@ -967,16 +1043,27 @@ Now output the JSON.`.trim();
                     f.vx = 0;
                 }
 
-                // cooldowns
+                // Cooldowns / stun
                 if (f.cooldown > 0) f.cooldown--;
                 if (f.specialCD > 0) f.specialCD--;
                 if (f.stun > 0) f.stun--;
 
-                // State transitions
-                const canAct = f.state !== "ko" && f.stun === 0;
+                // Jump feel helpers: coyote + buffer
+                if (f.onGround) f.coyote = 6;
+                else f.coyote = Math.max(0, f.coyote - 1);
 
-                // Block
-                const wantsBlock = !!(m & IN.B) && f.onGround && canAct;
+                f.jumpBuf = Math.max(0, f.jumpBuf - 1);
+                if (m & IN.J) f.jumpBuf = 6;
+
+                const canAct = (f.state !== "ko" && f.stun === 0);
+
+                // Determine current state flags FIRST (movement uses inAttack)
+                const inAttack = (f.state === "punch" || f.state === "kick" || f.state === "special");
+                const inHurt = (f.state === "hurt");
+                const inBlock = (f.state === "block");
+
+                // Block (only on ground)
+                const wantsBlock = !!(m & IN.B) && f.onGround && canAct && !inHurt;
                 if (wantsBlock) {
                     if (f.state !== "block") {
                         f.state = "block";
@@ -987,21 +1074,23 @@ Now output the JSON.`.trim();
                     f.stateFrame = 0;
                 }
 
-                // Actions only if not in attack/hurt/ko/block
-                const inAttack = (f.state === "punch" || f.state === "kick" || f.state === "special");
-                const inHurt = (f.state === "hurt");
-                const inBlock = (f.state === "block");
-                if (canAct && !inAttack && !inHurt && !inBlock) {
-                    // Jump
-                    if ((m & IN.J) && f.onGround) {
-                        f.vy = -(f.d.jump * 16) * FP; // jump impulse
+                // Actions (only if not already attacking/hurt/block)
+                if (canAct && !inAttack && !inHurt && f.state !== "block") {
+                    // Jump (buffer + coyote)
+                    if (f.jumpBuf > 0 && f.coyote > 0) {
+                        f.vy = -(1100 + f.char.stats.jump * 110); // tuned for your integrateFighter gravity
                         f.onGround = false;
                         f.state = "jump";
                         f.stateFrame = 0;
+
+                        // IMPORTANT: clear jump buffer once it triggers
+                        f.jumpBuf = 0;
+                        f.coyote = 0;
+
                         Audio.sfx.jump();
                     }
 
-                    // Punch / Kick / Special
+                    // Attacks
                     if ((m & IN.P) && f.cooldown === 0) {
                         f.state = "punch";
                         f.stateFrame = 0;
@@ -1016,49 +1105,57 @@ Now output the JSON.`.trim();
                         f.state = "special";
                         f.stateFrame = 0;
                         f.specialCD = 26;
-                        // projectile spawns at a specific frame later
                     }
                 }
 
-                // Horizontal movement (allow in jump but not in attack/hurt/ko/block)
-                const canMove = (f.state !== "ko" && f.state !== "hurt" && f.state !== "block" && !inAttack);
+                // Recompute inAttack after potential state change above
+                const inAttack2 = (f.state === "punch" || f.state === "kick" || f.state === "special");
+
+                // Horizontal movement (after inAttack is defined)
+                const canMove = (f.state !== "ko" && f.state !== "hurt" && f.state !== "block" && !inAttack2);
                 if (canMove) {
                     const left = !!(m & IN.L);
                     const right = !!(m & IN.R);
+
                     let dir = 0;
                     if (left && !right) dir = -1;
                     if (right && !left) dir = 1;
+
+                    const speedRating = f.d.run; // ~274..382
+
+                    const maxGround = Math.floor((520 + speedRating * 2) * FP / 60); // ~12..16 px/frame
+                    const maxAir = Math.floor(maxGround * 85 / 100);
+
+                    const accelGround = Math.floor(maxGround * 28 / 100);
+                    const accelAir = Math.floor(maxAir * 18 / 100);
+
+                    const maxV = f.onGround ? maxGround : maxAir;
+                    const accel = f.onGround ? accelGround : accelAir;
+
                     if (dir !== 0) {
-                        // run speed
-                        const run = f.d.run; // base
-                        const accel = (run * 8) * FP / 60;
-                        const maxV = (run * 1) * FP / 60;
                         f.vx = clamp(f.vx + dir * accel, -maxV, maxV);
-                        if (f.onGround && f.state !== "jump") {
-                            f.state = "run";
-                        }
+                        if (f.onGround && f.state !== "jump") f.state = "run";
                     } else {
                         if (f.onGround && f.state === "run") f.state = "idle";
                     }
                 }
 
-                // Attack animation / special spawn timing / hurt end
+                // Advance animation frame
                 f.stateFrame++;
 
-                if (f.state === "hurt") {
-                    if (f.stateFrame > 12) {
-                        f.state = f.onGround ? "idle" : "jump";
-                        f.stateFrame = 0;
-                    }
+                // Hurt end
+                if (f.state === "hurt" && f.stateFrame > 12) {
+                    f.state = f.onGround ? "idle" : "jump";
+                    f.stateFrame = 0;
                 }
 
-                if (f.state === "jump") {
-                    if (f.onGround && f.stateFrame > 2) {
-                        f.state = "idle";
-                        f.stateFrame = 0;
-                    }
+                // Jump land
+                if (f.state === "jump" && f.onGround && f.stateFrame > 2) {
+                    f.state = "idle";
+                    f.stateFrame = 0;
                 }
 
+                // Attack end
                 if (f.state === "punch" && f.stateFrame > 12) {
                     f.state = f.onGround ? "idle" : "jump";
                     f.stateFrame = 0;
@@ -1068,10 +1165,14 @@ Now output the JSON.`.trim();
                     f.stateFrame = 0;
                 }
 
+                // Special timing (spawn projectile on frame 8)
                 if (f.state === "special") {
-                    // Spawn projectile on frame 8 (deterministic)
                     if (f.stateFrame === 8) {
-                        spawnProjectile(f);
+                        const spawned = spawnProjectile(f);
+                        if (spawned) {
+                            // small recoil for feel / spacing (deterministic)
+                            f.vx = Math.floor(f.vx * 60 / 100) - f.facing * (6 * FP);
+                        }
                     }
                     if (f.stateFrame > 18) {
                         f.state = f.onGround ? "idle" : "jump";
@@ -1094,15 +1195,13 @@ Now output the JSON.`.trim();
 
             updateFacing();
 
-            // Melee hits (check after both updated)
+            // Melee hits (after both updated)
             for (let i = 0; i < 2; i++) {
                 const a = fighters[i];
                 const b = fighters[1 - i];
 
                 const hit = getHitbox(a);
                 if (!hit) continue;
-
-                // prevent multi-hit same swing
                 if (a.lastHitFrame === frame) continue;
 
                 const hitRect = {
@@ -1111,9 +1210,11 @@ Now output the JSON.`.trim();
                     w: hit.w,
                     h: hit.h
                 };
+
                 const hurt = hurtboxRect(b);
 
-                if (aabb(hitRect, hurt) && b.state !== "ko") {
+                const verticalClose = Math.abs(a.y - b.y) < 140 * FP;
+                if (verticalClose && aabb(hitRect, hurt) && b.state !== "ko") {
                     a.lastHitFrame = frame;
                     applyDamage(a, b, hit.dmg, hit.type);
                 }
@@ -1127,7 +1228,6 @@ Now output the JSON.`.trim();
 
                 const pr = getProjectileRect(p);
 
-                // bounds
                 if (p.life <= 0 || pr.x < -80 * FP || pr.x > FIX_W + 80 * FP) {
                     projectiles.splice(pi, 1);
                     continue;
@@ -1149,7 +1249,7 @@ Now output the JSON.`.trim();
                 const pt = particles[i];
                 pt.x += pt.vx;
                 pt.y += pt.vy;
-                pt.vy += 40 * FP; // gravity
+                pt.vy += 40 * FP;
                 pt.life--;
                 if (pt.life <= 0) particles.splice(i, 1);
             }
@@ -1170,7 +1270,6 @@ Now output the JSON.`.trim();
                 }, 900);
             }
         }
-
         function buildLocalInputMask() {
             let m = 0;
             if (localKeyState.has("KeyA")) m |= IN.L;
@@ -1212,6 +1311,12 @@ Now output the JSON.`.trim();
             if (!lockstepCanAdvance(frame)) {
                 stalled = true;
                 stallFrames++;
+
+                // Ask peer to resend inputs if we've been waiting ~1 second.
+                if (stallFrames % 60 === 0) {
+                    Net.send({ t: "req", f: frame });
+                }
+
                 return;
             }
 
@@ -1267,14 +1372,58 @@ Now output the JSON.`.trim();
                 ctx.stroke();
             }
 
-            // Projectiles
+            // Projectiles (shape-based)
             for (const p of projectiles) {
-                const c = fighters[p.ownerIdx].char.palette.secondary;
-                ctx.fillStyle = c;
+                const x = p.x / FP;
+                const y = p.y / FP;
+                const r = (p.w / FP) / 2;
+
                 ctx.globalAlpha = 0.95;
-                ctx.beginPath();
-                ctx.arc(p.x / FP, p.y / FP, p.w / FP / 2, 0, Math.PI * 2);
-                ctx.fill();
+                ctx.fillStyle = p.color || "#66e3ff";
+                ctx.strokeStyle = "rgba(255,255,255,0.25)";
+                ctx.lineWidth = 2;
+
+                const shape = p.shape || "orb";
+                if (shape === "banana") {
+                    // Banana: curved capsule
+                    ctx.beginPath();
+                    ctx.ellipse(x, y, r * 1.2, r * 0.7, 0.6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (shape === "shuriken") {
+                    // Shuriken: 4-point star
+                    ctx.beginPath();
+                    for (let i = 0; i < 4; i++) {
+                        const ang = (Math.PI / 2) * i + (p.ownerIdx ? 0.2 : -0.2);
+                        const ox = Math.cos(ang) * r * 1.1;
+                        const oy = Math.sin(ang) * r * 1.1;
+                        ctx.lineTo(x + ox, y + oy);
+                        ctx.lineTo(x + ox * 0.25, y + oy * 0.25);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (shape === "kunai") {
+                    // Kunai: triangle + ring
+                    ctx.beginPath();
+                    ctx.moveTo(x + r, y);
+                    ctx.lineTo(x - r * 0.8, y - r * 0.6);
+                    ctx.lineTo(x - r * 0.8, y + r * 0.6);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.beginPath();
+                    ctx.arc(x - r * 0.95, y, r * 0.25, 0, Math.PI * 2);
+                    ctx.stroke();
+                } else {
+                    // Orb default
+                    ctx.beginPath();
+                    ctx.arc(x, y, r, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+
                 ctx.globalAlpha = 1;
             }
 
@@ -1319,45 +1468,125 @@ Now output the JSON.`.trim();
             const x = f.x / FP;
             const y = f.y / FP;
 
-            // body color
             const primary = f.char.palette.primary;
             const secondary = f.char.palette.secondary;
-
-            // "Animation" via stateFrame offsets
-            const bob = (f.state === "run") ? Math.sin((f.stateFrame / 2) * 0.7) * 3 :
-                (f.state === "idle") ? Math.sin((f.stateFrame / 10) * 0.7) * 1.5 :
-                    0;
 
             const w = f.w / FP;
             const h = f.h / FP;
 
-            // shadow
+            const viz = f.viz || { silhouette: "balanced", head: "none", face: "none", pattern: "plain", aura: "none" };
+
+            // Animation bob
+            const bob =
+                (f.state === "run") ? Math.sin((f.stateFrame / 2) * 0.7) * 3 :
+                    (f.state === "idle") ? Math.sin((f.stateFrame / 10) * 0.7) * 1.6 :
+                        0;
+
+            // Shadow
             ctx.fillStyle = "rgba(0,0,0,0.30)";
             ctx.beginPath();
-            ctx.ellipse(x, GROUND_Y + 8, 26, 10, 0, 0, Math.PI * 2);
+            ctx.ellipse(x, GROUND_Y + 8, 26 + (viz.silhouette === "bulky" ? 6 : 0), 10, 0, 0, Math.PI * 2);
             ctx.fill();
 
-            // torso
+            // Aura (high special looks more alive)
+            if (viz.aura && viz.aura !== "none") {
+                const auraCol =
+                    viz.aura === "electric" ? "rgba(102,227,255,0.18)" :
+                        viz.aura === "void" ? "rgba(201,167,255,0.18)" :
+                            viz.aura === "wind" ? "rgba(122,240,209,0.16)" :
+                                "rgba(255,206,90,0.16)";
+
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = auraCol;
+                ctx.beginPath();
+                ctx.ellipse(x, y - h * 0.6 + bob, w * 0.75, h * 0.60, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Body
             ctx.fillStyle = primary;
             roundRect(ctx, x - w / 2, y - h + bob, w, h, 14);
             ctx.fill();
 
-            // face stripe
-            ctx.fillStyle = "rgba(255,255,255,0.12)";
-            roundRect(ctx, x - w / 2 + 8, y - h + 18 + bob, w - 16, 10, 8);
-            ctx.fill();
-
-            // accent
+            // Pattern
+            ctx.globalAlpha = 0.16;
             ctx.fillStyle = secondary;
-            roundRect(ctx, x - w / 2 + 12, y - 36 + bob, w - 24, 8, 6);
+            if (viz.pattern === "stripe") {
+                for (let i = 0; i < 4; i++) {
+                    const px = x - w / 2 + 6 + i * (w / 4);
+                    roundRect(ctx, px, y - h + 14 + bob, 6, h - 28, 6);
+                    ctx.fill();
+                }
+            } else if (viz.pattern === "chevron") {
+                ctx.beginPath();
+                ctx.moveTo(x - w * 0.35, y - h * 0.55 + bob);
+                ctx.lineTo(x, y - h * 0.35 + bob);
+                ctx.lineTo(x + w * 0.35, y - h * 0.55 + bob);
+                ctx.lineTo(x + w * 0.28, y - h * 0.65 + bob);
+                ctx.lineTo(x, y - h * 0.47 + bob);
+                ctx.lineTo(x - w * 0.28, y - h * 0.65 + bob);
+                ctx.closePath();
+                ctx.fill();
+            } else if (viz.pattern === "dot") {
+                for (let yy = 0; yy < 5; yy++) {
+                    for (let xx = 0; xx < 3; xx++) {
+                        ctx.beginPath();
+                        ctx.arc(x - w * 0.25 + xx * w * 0.25, y - h * 0.75 + yy * h * 0.16 + bob, 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+            ctx.globalAlpha = 1;
+
+            // Head (simple cap area)
+            const headY = y - h + 18 + bob;
+            ctx.fillStyle = "rgba(255,255,255,0.10)";
+            roundRect(ctx, x - w * 0.35, headY, w * 0.70, 18, 10);
             ctx.fill();
 
-            // arms (simple)
+            // Headgear
+            ctx.fillStyle = secondary;
+            if (viz.head === "bandana") {
+                roundRect(ctx, x - w * 0.40, headY + 6, w * 0.80, 10, 8);
+                ctx.fill();
+            } else if (viz.head === "hood") {
+                ctx.globalAlpha = 0.35;
+                roundRect(ctx, x - w * 0.45, headY - 6, w * 0.90, 28, 14);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            } else if (viz.head === "helmet") {
+                ctx.globalAlpha = 0.50;
+                roundRect(ctx, x - w * 0.45, headY - 8, w * 0.90, 30, 14);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            } else if (viz.head === "topknot") {
+                ctx.beginPath();
+                ctx.arc(x, headY - 6, 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Face
+            if (viz.face === "mask") {
+                ctx.globalAlpha = 0.30;
+                ctx.fillStyle = secondary;
+                roundRect(ctx, x - w * 0.26, headY + 10, w * 0.52, 12, 8);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            } else if (viz.face === "visor") {
+                ctx.globalAlpha = 0.22;
+                ctx.fillStyle = "#ffffff";
+                roundRect(ctx, x - w * 0.28, headY + 10, w * 0.56, 12, 8);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+
+            // Arms (attack reach)
             const dir = f.facing;
             const armY = y - 72 + bob;
-            const armLen = (f.state === "punch" && f.stateFrame >= 4 && f.stateFrame <= 7) ? 42 :
-                (f.state === "kick" && f.stateFrame >= 6 && f.stateFrame <= 9) ? 30 :
-                    26;
+            const armLen =
+                (f.state === "punch" && f.stateFrame >= 4 && f.stateFrame <= 7) ? 42 :
+                    (f.state === "kick" && f.stateFrame >= 6 && f.stateFrame <= 9) ? 30 :
+                        26;
 
             ctx.strokeStyle = secondary;
             ctx.lineWidth = 6;
@@ -1367,7 +1596,7 @@ Now output the JSON.`.trim();
             ctx.lineTo(x + dir * armLen, armY + (f.state === "punch" ? -4 : 0));
             ctx.stroke();
 
-            // kick hint (leg)
+            // Leg hint (kick)
             const legY = y - 18;
             const legLen = (f.state === "kick" && f.stateFrame >= 5 && f.stateFrame <= 10) ? 44 : 26;
             ctx.strokeStyle = "rgba(255,255,255,0.18)";
@@ -1377,7 +1606,7 @@ Now output the JSON.`.trim();
             ctx.lineTo(x + dir * legLen, legY + 10);
             ctx.stroke();
 
-            // block shield
+            // Block shield
             if (f.state === "block") {
                 ctx.globalAlpha = 0.25;
                 ctx.fillStyle = secondary;
@@ -1444,6 +1673,53 @@ Now output the JSON.`.trim();
             // store remote by simulation frame
             if (!remoteInputs.has(f)) remoteInputs.set(f, mask | 0);
         }
+        function resendLocalInputs(from, count = 180) {
+            // Resend already-known local inputs for a window of frames.
+            // Helps recovery if the peer is missing some frames for any reason.
+            for (let f = from; f < from + count; f++) {
+                if (localInputs.has(f)) {
+                    Net.send({ t: "in", f, m: localInputs.get(f) | 0 });
+                }
+            }
+        }
+
+        function hashStr32(s) {
+            // Deterministic 32-bit hash (FNV-1a-ish)
+            s = String(s || "");
+            let h = 2166136261 | 0;
+            for (let i = 0; i < s.length; i++) {
+                h ^= s.charCodeAt(i);
+                h = Math.imul(h, 16777619);
+            }
+            return h | 0;
+        }
+
+        function pick(arr, h, salt) {
+            const idx = Math.abs((h ^ (salt | 0)) | 0) % arr.length;
+            return arr[idx];
+        }
+
+        function deriveVisuals(char) {
+            const h = hashStr32(char.name + "|" + char.tagline);
+
+            // Silhouette from stats (so it "feels" tied to build)
+            const bulkyScore = (char.stats.health + char.stats.defense) - char.stats.speed;
+            const nimbleScore = char.stats.speed + char.stats.jump - char.stats.health;
+
+            const silhouette =
+                bulkyScore >= 6 ? "bulky" :
+                    nimbleScore >= 6 ? "nimble" :
+                        "balanced";
+
+            const head = pick(["none", "bandana", "hood", "helmet", "topknot"], h, 11);
+            const face = pick(["none", "mask", "visor"], h, 23);
+            const pattern = pick(["plain", "stripe", "chevron", "dot"], h, 37);
+            const aura = (char.stats.special >= 7) ? pick(["none", "electric", "void", "wind", "fire"], h, 51) : "none";
+
+            const projShape = pick(["orb", "shuriken", "kunai", "banana"], h, 71);
+
+            return { h, silhouette, head, face, pattern, aura, projShape };
+        }
 
         function pushLocalInput(f, mask) {
             if (!localInputs.has(f)) localInputs.set(f, mask | 0);
@@ -1461,6 +1737,7 @@ Now output the JSON.`.trim();
             stop,
             pushRemoteInput,
             pushLocalInput,
+            resendLocalInputs,
             setKey,
             get frame() { return frame; }
         };
@@ -2049,6 +2326,13 @@ Now output the JSON.`.trim();
                     return;
                 }
 
+                if (msg.t === "req") {
+                    // Peer requests resend starting from frame msg.f
+                    const from = msg.f | 0;
+                    Game.resendLocalInputs(from, 180);
+                    return;
+                }
+
                 if (msg.t === "in") {
                     // Remote input for a given frame
                     const f = msg.f | 0;
@@ -2094,9 +2378,5 @@ Now output the JSON.`.trim();
     boot();
 })();
 
-
 import './index.css';
 
-console.log(
-  '👋 This message is being logged by "renderer.js", included via Vite',
-);
