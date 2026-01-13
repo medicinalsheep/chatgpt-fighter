@@ -1,9 +1,3 @@
-/* chatGPT fighter - renderer
-   Pure HTML/CSS/JS deterministic lockstep fighter with P2P WebRTC DataChannel.
-
-   NOTE: Manual Offer/Answer copy/paste signaling means no backend needed.
-*/
-
 (() => {
     // -----------------------------
     // Utilities
@@ -1181,7 +1175,13 @@ Now output the JSON.`.trim();
                 }
 
                 // Integrate after logic
-                integrateFighter(f);
+                integrateFighter(f); {
+                    // Gravity
+                    const gravity = 1200 * FP / FPS; // per frame acceleration scaled
+                    if (!f.onGround) {
+                        f.vy += gravity;
+                    }
+                }
 
                 // Soft push apart to prevent overlap
                 const hb = getHurtbox(f);
