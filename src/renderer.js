@@ -1174,12 +1174,39 @@ Now output the JSON.`.trim();
                     }
                 }
 
-                // Integrate after logic
-                integrateFighter(f); {
-                    // Gravity
-                    const gravity = 1200 * FP / FPS; // per frame acceleration scaled
+                function integrateFighter(f) {
+                    // Physics tuned for FP-per-frame velocities (deterministic integers)
+                    const gravity = 220;        // 2.20 px/frame^2 in FP units
+                    const terminal = 2600;      // 26 px/frame max fall speed in FP
+
                     if (!f.onGround) {
-                        f.vy += gravity;
+                        f.vy = clamp(f.vy + gravity, -999999, terminal);
+                    }
+
+                    f.x += f.vx;
+                    f.y += f.vy;
+
+                    // Floor
+                    if (f.y >= FIX_GROUND) {
+                        f.y = FIX_GROUND;
+                        f.vy = 0;
+                        f.onGround = true;
+                    } else {
+                        f.onGround = false;
+                    }
+
+                    // Walls
+                    const leftWall = 60 * FP;
+                    const rightWall = FIX_W - 60 * FP;
+                    f.x = clamp(f.x, leftWall, rightWall);
+
+                    // Friction / air drag (slightly less slippery)
+                    if (f.onGround) {
+                        f.vx = Math.floor(f.vx * 88 / 100);
+                        if (Math.abs(f.vx) < 10 * FP) f.vx = 0;
+                    } else {
+                        f.vx = Math.floor(f.vx * 97 / 100);
+                        if (Math.abs(f.vx) < 6 * FP) f.vx = 0;
                     }
                 }
 
