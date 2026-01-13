@@ -1137,6 +1137,8 @@ Now output the JSON.`.trim();
                 // Advance animation frame
                 f.stateFrame++;
 
+                integrateFighter(f);
+
                 // Hurt end
                 if (f.state === "hurt" && f.stateFrame > 12) {
                     f.state = f.onGround ? "idle" : "jump";
